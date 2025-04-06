@@ -1,8 +1,9 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.utils.dates import days_ago
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+
 import requests
-import psycopg2
 import os
 import json
 from datetime import datetime
@@ -11,11 +12,11 @@ from datetime import datetime
 def extract_aqi_data(**context):
     api_key = os.getenv("api_key_AQI")
     url = f"https://api.airvisual.com/v2/city?city=Bangkok&state=Bangkok&country=Thailand&key={api_key}"
-    
+
     response = requests.get(url)
     response.raise_for_status()
     data = response.json()
-    
+
     context['ti'].xcom_push(key='raw_data', value=json.dumps(data))
 
 # ---------- TASK 2: Transform ----------
@@ -43,13 +44,8 @@ def transform_aqi_data(**context):
 def load_to_postgres(**context):
     transformed = json.loads(context['ti'].xcom_pull(task_ids='transform_aqi_data', key='transformed_data'))
 
-    conn = psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "db"),
-        dbname=os.getenv("POSTGRES_DB", "postgres"),
-        user=os.getenv("POSTGRES_USER", "postgres"),
-        password=os.getenv("POSTGRES_PASSWORD", "postgres"),
-        port=5432
-    )
+    hook = PostgresHook(postgres_conn_id="hook_postgres")
+    conn = hook.get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -72,13 +68,8 @@ def load_to_postgres(**context):
 
 # ---------- TASK 4: Build Daily Summary ----------
 def build_daily_summary():
-    conn = psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "db"),
-        dbname=os.getenv("POSTGRES_DB", "postgres"),
-        user=os.getenv("POSTGRES_USER", "postgres"),
-        password=os.getenv("POSTGRES_PASSWORD", "postgres"),
-        port=5432
-    )
+    hook = PostgresHook(postgres_conn_id="hook_postgres")
+    conn = hook.get_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -110,13 +101,8 @@ def build_daily_summary():
 
 # ---------- TASK 5: Build Weekly Summary ----------
 def build_weekly_summary():
-    conn = psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "db"),
-        dbname=os.getenv("POSTGRES_DB", "postgres"),
-        user=os.getenv("POSTGRES_USER", "postgres"),
-        password=os.getenv("POSTGRES_PASSWORD", "postgres"),
-        port=5432
-    )
+    hook = PostgresHook(postgres_conn_id="hook_postgres")
+    conn = hook.get_conn()
     cur = conn.cursor()
 
     cur.execute("DROP TABLE IF EXISTS aqi_weekly_summary;")
@@ -146,16 +132,11 @@ def build_weekly_summary():
 
 # ---------- TASK 6: Build Monthly Summary ----------
 def build_monthly_summary():
-    conn = psycopg2.connect(
-        host=os.getenv("POSTGRES_HOST", "db"),
-        dbname=os.getenv("POSTGRES_DB", "postgres"),
-        user=os.getenv("POSTGRES_USER", "postgres"),
-        password=os.getenv("POSTGRES_PASSWORD", "postgres"),
-        port=5432
-    )
+    hook = PostgresHook(postgres_conn_id="hook_postgres")
+    conn = hook.get_conn()
     cur = conn.cursor()
 
-    cur.execute("DROP TABLE IF EXISTS aqi_monthly_summary;")  # 🔧 fix typo: was "monthy"
+    cur.execute("DROP TABLE IF EXISTS aqi_monthly_summary;")
     cur.execute("""
         CREATE TABLE aqi_monthly_summary (
             month_start DATE PRIMARY KEY,
@@ -185,7 +166,7 @@ def build_monthly_summary():
 with DAG(
     dag_id="capstone_pipeline",
     start_date=days_ago(1),
-    schedule_interval="0 */12 * * *",
+    schedule_interval="0 */12 * * *",  # Run every 12 hours
     catchup=False,
     tags=["dpu", "aqi"],
 ) as dag:
@@ -223,4 +204,5 @@ with DAG(
         python_callable=build_monthly_summary,
     )
 
+    # Task dependencies
     t1 >> t2 >> t3 >> [t4, t5, t6]
